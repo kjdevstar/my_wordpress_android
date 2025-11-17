@@ -1,0 +1,176 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/buildkite/pipeline-schema/main/schema.json
+---
+
+# Nodes with values to reuse in the pipeline.
+common_params:
+  - &test_collector_common_params
+      files: "buildkite-test-analytics/*.xml"
+      format: "junit"
+
+agents:
+  queue: "android"
+
+steps:
+  #################
+  # Gradle Wrapper Validation
+  #################
+  - label: Gradle Wrapper Validation
+    command: validate_gradle_wrapper
+    agents:
+      queue: linter
+
+  # Wait for Gradle Wrapper to be validated before running any other jobs
+  - wait
+
+  #################
+  # Linters
+  #################
+  - group: "🕵️‍♂️ Linters"
+    steps:
+      - label: "☢️ Danger - PR Check"
+        command: danger
+        key: danger
+        if: "build.pull_request.id != null"
+        retry:
+          manual:
+            permit_on_passed: true
+        agents:
+          queue: "linter"
+
+      - label: "🕵️ checkstyle"
+        command: |
+          if .buildkite/commands/should-skip-job.sh --job-type validation; then
+            exit 0
+          fi
+
+          ./gradlew checkstyle
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/checkstyle/checkstyle.*"
+
+      - label: "🕵️ detekt"
+        command: |
+          if .buildkite/commands/should-skip-job.sh --job-type validation; then
+            exit 0
+          fi
+
+          ./gradlew detekt
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/detekt/detekt.html"
+
+      - label: "🕵️ Lint WordPress"
+        command: ".buildkite/commands/lint.sh wordpress"
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/lint-results*.*"
+
+      - label: "🕵️ Lint Jetpack"
+        command: ".buildkite/commands/lint.sh jetpack"
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/lint-results*.*"
+
+  #################
+  # Diff Reports
+  #################
+  - group: "🕵️‍♂️ Diff Reports"
+    steps:
+      - label: "Dependency Tree Diff"
+        command: |
+          comment_with_dependency_diff 'WordPress' 'wordpressVanillaReleaseRuntimeClasspath'
+        if: build.pull_request.id != null
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/diff/*"
+
+      - label: "Merged Manifest Diff WordPress"
+        command: ".buildkite/commands/diff-merged-manifest.sh wordpressVanillaRelease"
+        if: build.pull_request.id != null
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/diff_manifest/**/**/*"
+
+      - label: "Merged Manifest Diff Jetpack"
+        command: ".buildkite/commands/diff-merged-manifest.sh jetpackVanillaRelease"
+        if: build.pull_request.id != null
+        plugins: [$CI_TOOLKIT]
+        artifact_paths:
+          - "**/build/reports/diff_manifest/**/**/*"
+
+  #################
+  # Unit Tests
+  #################
+  - label: "🔬 Unit Tests"
+    key: unit-tests
+    command: ".buildkite/commands/run-unit-tests.sh"
+    plugins:
+      - $CI_TOOLKIT
+      - $TEST_COLLECTOR :
+          <<: *test_collector_common_params
+          api-token-env-name: "BUILDKITE_ANALYTICS_TOKEN_UNIT_TESTS_WORDPRESS"
+      - $CLAUDE_PLUGIN:
+          api_key: "$ANTHROPIC_API_KEY"
+          buildkite_api_token: "$BUILDKITE_TOKEN_FOR_CLAUDE"
+    artifact_paths:
+      - "**/build/test-results/merged-test-results.xml"
+      - "**/build/reports/kover/*.xml"
+
+  - label: "💬 Comment Claude Analysis"
+    command: .buildkite/commands/comment-claude-analysis.sh
+    depends_on: unit-tests
+    allow_dependency_failure: true
+    if: build.pull_request.id != null
+    plugins:
+      - $CI_TOOLKIT
+
+  #################
+  # Instrumented (aka UI) Tests
+  #################
+  # - group: "🔬 Instrumented tests"
+  #   steps:
+  #     - label: ":wordpress: 🔬 Instrumented tests"
+  #       command: ".buildkite/commands/run-instrumented-tests.sh wordpress"
+  #       plugins:
+  #         - $CI_TOOLKIT
+  #         - $TEST_COLLECTOR :
+  #             <<: *test_collector_common_params
+  #             api-token-env-name: "BUILDKITE_ANALYTICS_TOKEN_INSTRUMENTED_TESTS_WORDPRESS"
+  #       artifact_paths:
+  #         - "**/build/instrumented-tests/**/*"
+
+  #     - label: ":jetpack: 🔬 Instrumented tests"
+  #       command: ".buildkite/commands/run-instrumented-tests.sh jetpack"
+  #       plugins:
+  #         - $CI_TOOLKIT
+  #         - $TEST_COLLECTOR :
+  #             <<: *test_collector_common_params
+  #             api-token-env-name: "BUILDKITE_ANALYTICS_TOKEN_INSTRUMENTED_TESTS_JETPACK"
+  #       artifact_paths:
+  #         - "**/build/instrumented-tests/**/*"
+
+  #################
+  # Create Prototype Builds for WP and JP
+  #################
+  - group: "📲 Prototype Builds"
+    steps:
+      - label: ":wordpress: :android: Prototype Build"
+        command: ".buildkite/commands/prototype-build.sh wordpress"
+        if: build.pull_request.id != null
+        plugins: [$CI_TOOLKIT]
+
+      - label: ":jetpack: :android: Prototype Build"
+        command: ".buildkite/commands/prototype-build.sh jetpack"
+        if: build.pull_request.id != null
+        plugins: [$CI_TOOLKIT ]
+
+  - group: "🐘 Gradle build cache"
+    steps:
+      - label: ":wordpress: Populate Gradle build cache"
+        command: ".buildkite/commands/gradle-cache-build.sh wordpress"
+        plugins: [ $CI_TOOLKIT ]
+
+      - label: ":jetpack: Populate Gradle build cache"
+        command: ".buildkite/commands/gradle-cache-build.sh jetpack"
+        plugins: [ $CI_TOOLKIT ]
+
